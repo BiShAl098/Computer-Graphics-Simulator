@@ -226,6 +226,23 @@ int main() {
 				}
 			}
 
+			if (event.type == sf::Event::KeyPressed) {
+				if (event.key.code == sf::Keyboard::Delete) {
+					if (selectedLine != -1) {
+						lines.erase(lines.begin() + selectedLine);
+						selectedLine = -1;
+					}
+					else if (selectedCircle != -1) {
+						circles.erase(circles.begin() + selectedCircle);
+						selectedCircle = -1;
+					}
+					else if (selectedEllipse != -1) {
+						ellipses.erase(ellipses.begin() + selectedEllipse);
+						selectedEllipse = -1;
+					}
+				}
+			}
+
 			// --- Mouse click ---
 			if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left) {
 				sf::Vector2f mousePos = window.mapPixelToCoords(sf::Mouse::getPosition(window));
@@ -256,23 +273,51 @@ int main() {
 						// if (dist <= circles[i].radius) { selectedCircle = (int)i; break; }
 					}
 					// Check ellipses
+/// Check ellipses - edge-only selection
 					for (size_t i = 0; i < ellipses.size(); i++) {
-						float dx = (mousePos.x - ellipses[i].center.x) / ellipses[i].rx;
-						float dy = (mousePos.y - ellipses[i].center.y) / ellipses[i].ry;
-						if (std::abs(dx * dx + dy * dy - 1.0f) < 0.2f) { selectedEllipse = (int)i; break; }
+						float dx = mousePos.x - ellipses[i].center.x;
+						float dy = mousePos.y - ellipses[i].center.y;
+
+						float rx = ellipses[i].rx;
+						float ry = ellipses[i].ry;
+
+						// Normalized ellipse equation
+						float val = (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry);
+
+						// Edge-only: select if close to boundary (≈1.0)
+						if (std::abs(val - 1.0f) < 0.05f) {   // tolerance can be tuned
+							selectedEllipse = static_cast<int>(i);
+							break;
+						}
 					}
 				}
 
 				// Draw Line
-				if (currentMode == DRAW_DDA || currentMode == DRAW_BRES) {
+				// Draw Line (DDA or Bresenham depending on mode)
+				// --- Draw Line (DDA) ---
+				if (currentMode == DRAW_DDA) {
 					tempPoints.push_back(mousePos);
 					if (tempPoints.size() == 2) {
-						Line line;
-						line.p1 = tempPoints[0];
-						line.p2 = tempPoints[1];
-						line.useDDA = (currentMode == DRAW_DDA);
-						line.color = line.useDDA ? sf::Color::Red : sf::Color::Green;
-						lines.push_back(line);
+						Line l;
+						l.p1 = tempPoints[0];
+						l.p2 = tempPoints[1];
+						l.color = sf::Color::Green;   // DDA lines = Green
+						l.useDDA = true;
+						lines.push_back(l);
+						tempPoints.clear();
+					}
+				}
+
+				// --- Draw Line (Bresenham) ---
+				if (currentMode == DRAW_BRES) {
+					tempPoints.push_back(mousePos);
+					if (tempPoints.size() == 2) {
+						Line l;
+						l.p1 = tempPoints[0];
+						l.p2 = tempPoints[1];
+						l.color = sf::Color::Red;     // Bresenham lines = Red
+						l.useDDA = false;
+						lines.push_back(l);
 						tempPoints.clear();
 					}
 				}
@@ -369,16 +414,12 @@ int main() {
             window.draw(highlight);
         }
 
-        if (selectedEllipse != -1) {
-            auto& e = ellipses[selectedEllipse];
-            sf::CircleShape highlight(1.0f); // use scale to make ellipse
-            highlight.setPosition(e.center.x - e.rx, e.center.y - e.ry);
-            highlight.setScale(e.rx, e.ry);
-            highlight.setFillColor(sf::Color::Transparent);
-            highlight.setOutlineColor(sf::Color::Yellow);
-            highlight.setOutlineThickness(2);
-            window.draw(highlight);
-        }
+		 if (selectedEllipse != -1) {
+			 Ellipse e = ellipses[selectedEllipse];
+			 Ellipse highlight = e;
+			 highlight.color = sf::Color::Yellow; // override color
+			 drawEllipse(pixels, highlight);      // same algorithm, now yellow
+		 }
 
         window.display();
     }
