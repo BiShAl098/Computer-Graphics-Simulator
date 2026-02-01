@@ -1,6 +1,6 @@
 ﻿/*
  * ============================================================
- *  PENDULUM COLLISION SIMULATION
+ *  PENDULUM COLLISION SIMULATION  +  MANUAL SCALING
  *  Full manual rasterization + physics — C++ / SFML 2.6.1
  * ============================================================
  *  Rasterization (zero built-in math):
@@ -14,9 +14,17 @@
  *      - Fresnel rim glow
  *      - Radial outer glow ring
  *
+ *  Scaling (manual math, no library calls):
+ *      - Each ball owns: baseRadius, scaleFactor, scaleTarget
+ *      - On click: scaleTarget = clamp(random, SCALE_MIN, SCALE_MAX)
+ *                  independently for each ball
+ *      - Every frame: scaleFactor lerps toward scaleTarget
+ *      - drawRadius = (int)(baseRadius * scaleFactor)   <-- applied
+ *                     to scanline fill, glow, outline, AND collision
+ *
  *  Physics:
  *      - Pendulum torque:  a = -(g / L) * sin(theta)
- *      - Elastic collision detection + impulse resolution
+ *      - Elastic collision uses scaled radii for minDist
  *      - Sub-stepping (8 steps/frame) for stability
  *
  *  Build (Visual Studio):
@@ -24,14 +32,9 @@
  *      Link: sfml-graphics.lib  sfml-window.lib  sfml-system.lib
  *      Compile as C++17.
  *
- *  Build (g++ command line):
- *      g++ -O2 -std=c++17 BallCollision.cpp -o BallCollision
- *          -I<sfml-include> -L<sfml-lib>
- *          -lsfml-graphics -lsfml-window -lsfml-system
- *
  *  Controls:
- *      Left click anywhere  — reset simulation
- *      Close window         — quit
+ *      Left click   — randomise both ball scales (clamped)
+ *      Close window — quit
  * ============================================================
  */
 
@@ -42,6 +45,8 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 
  // ════════════════════════════════════════════════════════════════════════════
  //  CONSTANTS
@@ -51,12 +56,15 @@ static const unsigned int WIN_H = 700u;
 static const float        GRAVITY = 980.0f;
 static const float        DAMPING = 0.9996f;
 static const int          SUB_STEPS = 8;
-static const int          BALL_RADIUS = 28;
+static const int          BALL_BASE_RADIUS = 28;   // base radius before scaling
+
+// ── Scaling clamp range ──
+static const float SCALE_MIN = 0.4f;   // smallest allowed scale
+static const float SCALE_MAX = 2.6f;   // largest allowed scale
+static const float SCALE_LERP = 4.0f;   // how fast scaleFactor chases scaleTarget (per second)
 
 // ════════════════════════════════════════════════════════════════════════════
 //  PIXEL BUFFER
-//  Raw RGBA array.  Every pixel is written manually.
-//  Blit path: pixelBuf -> sf::Image::create -> sf::Texture -> draw
 // ════════════════════════════════════════════════════════════════════════════
 static sf::Uint8 pixelBuf[WIN_W * WIN_H * 4];
 
@@ -73,7 +81,6 @@ static void clearBuffer(sf::Uint8 r, sf::Uint8 g, sf::Uint8 b)
     }
 }
 
-// Alpha-blend onto existing pixel
 static void setPixel(int x, int y,
     sf::Uint8 r, sf::Uint8 g, sf::Uint8 b, sf::Uint8 a = 255)
 {
@@ -124,7 +131,6 @@ static void bresenhamLine(int x0, int y0, int x1, int y1,
     }
 }
 
-// Thick line: N offset copies along the perpendicular
 static void thickLine(int x0, int y0, int x1, int y1, int thickness,
     sf::Uint8 r, sf::Uint8 g, sf::Uint8 b, sf::Uint8 a = 255)
 {
@@ -138,7 +144,6 @@ static void thickLine(int x0, int y0, int x1, int y1, int thickness,
         return;
     }
 
-    // Perpendicular unit vector
     float px = -dy / len;
     float py = dx / len;
 
@@ -152,7 +157,7 @@ static void thickLine(int x0, int y0, int x1, int y1, int thickness,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  MIDPOINT CIRCLE  (outline — all 8 octants)
+//  MIDPOINT CIRCLE  (outline)
 // ════════════════════════════════════════════════════════════════════════════
 static void midpointCircle(int cx, int cy, int radius,
     sf::Uint8 r, sf::Uint8 g, sf::Uint8 b, sf::Uint8 a = 255)
@@ -174,9 +179,7 @@ static void midpointCircle(int cx, int cy, int radius,
 
         ++y;
         if (p < 0)
-        {
             p += 2 * y + 1;
-        }
         else
         {
             --x;
@@ -186,17 +189,16 @@ static void midpointCircle(int cx, int cy, int radius,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  SCANLINE FILL  —  circle with per-pixel Lambert + Phong + Fresnel shading
+//  SCANLINE FILL  —  Lambert + Phong + Fresnel
 // ════════════════════════════════════════════════════════════════════════════
-
-// Light direction (top-left).  Pre-normalised.
-static const float LIGHT_LX = -0.5f / 0.8602f;   // -0.5 / sqrt(0.25+0.49)
+static const float LIGHT_LX = -0.5f / 0.8602f;
 static const float LIGHT_LY = -0.7f / 0.8602f;
 
 static void scanlineFillCircle(int cx, int cy, int radius,
     sf::Uint8 baseR, sf::Uint8 baseG, sf::Uint8 baseB,
     sf::Uint8 glowR, sf::Uint8 glowG, sf::Uint8 glowB)
 {
+    if (radius < 1) return;
     float invR = 1.0f / (float)radius;
 
     for (int y = cy - radius; y <= cy + radius; ++y)
@@ -212,28 +214,22 @@ static void scanlineFillCircle(int cx, int cy, int radius,
         for (int x = xLeft; x <= xRight; ++x)
         {
             float dx = (float)(x - cx);
-
-            // Distance from centre, normalised [0 … 1]
             float dist = (float)std::sqrt((double)(dx * dx + dy * dy)) * invR;
 
-            // ── Sphere normal (unit sphere) ──
             float nx = dx * invR;
             float ny = dy * invR;
             float nz2 = 1.0f - nx * nx - ny * ny;
             float nz = (nz2 > 0.0f) ? (float)std::sqrt((double)nz2) : 0.0f;
 
-            // ── Lambert diffuse ──
             float diff = nx * LIGHT_LX + ny * LIGHT_LY + nz * 0.7f;
             if (diff < 0.0f) diff = 0.0f;
 
-            // ── Phong specular  (view along +Z) ──
             float spec = nz * 0.9f + diff * 0.3f;
             if (spec < 0.0f) spec = 0.0f;
-            spec = spec * spec;   // ^2
-            spec = spec * spec;   // ^4
+            spec = spec * spec;
+            spec = spec * spec;
             spec = spec * spec;   // ^8
 
-            // ── Combine ──
             float shade = 0.12f + diff * 0.70f + spec * 0.50f;
             if (shade > 1.4f) shade = 1.4f;
 
@@ -241,25 +237,23 @@ static void scanlineFillCircle(int cx, int cy, int radius,
             float fG = (float)baseG * shade;
             float fB = (float)baseB * shade;
 
-            // ── Fresnel rim ──
             float rim = dist * dist;
             fR += (float)glowR * rim * 0.30f;
             fG += (float)glowG * rim * 0.30f;
             fB += (float)glowB * rim * 0.30f;
 
-            sf::Uint8 outR = (sf::Uint8)std::min(fR, 255.0f);
-            sf::Uint8 outG = (sf::Uint8)std::min(fG, 255.0f);
-            sf::Uint8 outB = (sf::Uint8)std::min(fB, 255.0f);
-
-            setPixel(x, y, outR, outG, outB, 255);
+            setPixel(x, y,
+                (sf::Uint8)std::min(fR, 255.0f),
+                (sf::Uint8)std::min(fG, 255.0f),
+                (sf::Uint8)std::min(fB, 255.0f), 255);
         }
     }
 }
 
-// Outer glow ring  —  scanline filled, alpha fades to 0 at edge
 static void scanlineGlowRing(int cx, int cy, int radius,
     sf::Uint8 r, sf::Uint8 g, sf::Uint8 b)
 {
+    if (radius < 1) return;
     float invR = 1.0f / (float)radius;
 
     for (int y = cy - radius; y <= cy + radius; ++y)
@@ -291,13 +285,10 @@ static void scanlineGlowRing(int cx, int cy, int radius,
 static void drawGrid()
 {
     const int STEP = 60;
-
-    // Vertical lines
     for (int x = 0; x < (int)WIN_W; x += STEP)
         for (int y = 0; y < (int)WIN_H; ++y)
             setPixel(x, y, 20, 20, 30, 35);
 
-    // Horizontal lines
     for (int y = 0; y < (int)WIN_H; y += STEP)
         for (int x = 0; x < (int)WIN_W; ++x)
             setPixel(x, y, 20, 20, 30, 35);
@@ -310,18 +301,46 @@ struct Ball
 {
     float     pivotX, pivotY;
     float     length;
-    float     angle;          // radians,  0 = straight down
+    float     angle;
     float     angularVel;
-    int       radius;
-    float     x, y;           // tip position (world)
+
+    int       baseRadius;     // original radius (never changes)
+    float     scaleFactor;    // current scale (animated)
+    float     scaleTarget;    // target scale (set on click)
+
+    float     x, y;
 
     sf::Uint8 baseR, baseG, baseB;
     sf::Uint8 glowR, glowG, glowB;
+
+    // ── Manual scaling math ──────────────────────────────────────────
+    //   scaledRadius = baseRadius * scaleFactor
+    //   This is the ONLY place scaling is computed.
+    //   Everything that draws or collides reads scaledRadius().
+    int scaledRadius() const
+    {
+        // multiply base by current factor, truncate to int
+        int r = (int)((float)baseRadius * scaleFactor);
+        return (r < 1) ? 1 : r;   // never let it go to 0
+    }
 
     void updatePosition()
     {
         x = pivotX + length * (float)std::sin((double)angle);
         y = pivotY + length * (float)std::cos((double)angle);
+    }
+
+    // Lerp scaleFactor toward scaleTarget each frame
+    void updateScale(float dt)
+    {
+        float diff = scaleTarget - scaleFactor;
+        // exponential ease: move a fraction of the remaining gap
+        float move = diff * SCALE_LERP * dt;
+        // if move overshoots, just snap
+        if ((diff > 0.0f && move > diff) || (diff < 0.0f && move < diff))
+            scaleFactor = scaleTarget;
+        else
+            scaleFactor += move;
     }
 };
 
@@ -330,6 +349,23 @@ struct Ball
 // ════════════════════════════════════════════════════════════════════════════
 static Ball  balls[2];
 static float globalPivotY;
+
+// ── Simple pseudo-random float in [0, 1) ────────────────────────────────
+static float randFloat()
+{
+    return (float)std::rand() / ((float)RAND_MAX + 1.0f);
+}
+
+// ── Generate a random scale clamped to [SCALE_MIN, SCALE_MAX] ──────────
+static float randomClampedScale()
+{
+    // random value in [0,1) mapped to [SCALE_MIN, SCALE_MAX]
+    float r = SCALE_MIN + randFloat() * (SCALE_MAX - SCALE_MIN);
+    // clamp (belt & suspenders)
+    if (r < SCALE_MIN) r = SCALE_MIN;
+    if (r > SCALE_MAX) r = SCALE_MAX;
+    return r;
+}
 
 static void resetSimulation()
 {
@@ -342,7 +378,9 @@ static void resetSimulation()
     balls[0].length = 220.0f;
     balls[0].angle = -0.65f;
     balls[0].angularVel = 0.0f;
-    balls[0].radius = BALL_RADIUS;
+    balls[0].baseRadius = BALL_BASE_RADIUS;
+    balls[0].scaleFactor = 1.0f;
+    balls[0].scaleTarget = 1.0f;
     balls[0].baseR = 220; balls[0].baseG = 80; balls[0].baseB = 50;
     balls[0].glowR = 255; balls[0].glowG = 120; balls[0].glowB = 60;
     balls[0].updatePosition();
@@ -353,10 +391,19 @@ static void resetSimulation()
     balls[1].length = 240.0f;
     balls[1].angle = 0.60f;
     balls[1].angularVel = 0.0f;
-    balls[1].radius = BALL_RADIUS;
+    balls[1].baseRadius = BALL_BASE_RADIUS;
+    balls[1].scaleFactor = 1.0f;
+    balls[1].scaleTarget = 1.0f;
     balls[1].baseR = 50; balls[1].baseG = 130; balls[1].baseB = 220;
     balls[1].glowR = 80; balls[1].glowG = 180; balls[1].glowB = 255;
     balls[1].updatePosition();
+}
+
+// Called on every left-click: both balls get NEW independent random targets
+static void randomiseScales()
+{
+    balls[0].scaleTarget = randomClampedScale();
+    balls[1].scaleTarget = randomClampedScale();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -375,48 +422,44 @@ static void physicsTick(float dt)
         b.updatePosition();
     }
 
-    // ── 2) Elastic collision ──
+    // ── 2) Elastic collision  (uses scaledRadius for both balls) ──
     Ball& A = balls[0];
     Ball& B = balls[1];
 
     float dx = B.x - A.x;
     float dy = B.y - A.y;
     float dist = (float)std::sqrt((double)(dx * dx + dy * dy));
-    float minD = (float)(A.radius + B.radius);
+
+    // Collision distance = sum of SCALED radii
+    float minD = (float)(A.scaledRadius() + B.scaledRadius());
 
     if (dist < minD && dist > 0.001f)
     {
-        // Unit normal  A -> B
         float nx = dx / dist;
         float ny = dy / dist;
 
-        // Tip velocities  (v = omega x r)
         float vAx = A.angularVel * A.length * (float)std::cos((double)A.angle);
         float vAy = -A.angularVel * A.length * (float)std::sin((double)A.angle);
         float vBx = B.angularVel * B.length * (float)std::cos((double)B.angle);
         float vBy = -B.angularVel * B.length * (float)std::sin((double)B.angle);
 
-        // Relative velocity along normal
         float relVn = (vAx - vBx) * nx + (vAy - vBy) * ny;
 
-        if (relVn > 0.0f)   // balls approaching each other
+        if (relVn > 0.0f)
         {
-            float j = relVn;   // impulse magnitude (equal mass)
+            float j = relVn;
 
-            // Tangent directions of each pendulum
             float tAx = (float)std::cos((double)A.angle);
             float tAy = -(float)std::sin((double)A.angle);
             float tBx = (float)std::cos((double)B.angle);
             float tBy = -(float)std::sin((double)B.angle);
 
-            // Angular velocity deltas
             float dOmA = -(j * (nx * tAx + ny * tAy)) / A.length;
             float dOmB = (j * (nx * tBx + ny * tBy)) / B.length;
 
             A.angularVel += dOmA;
             B.angularVel += dOmB;
 
-            // Positional correction — separate overlapping balls
             float overlap = minD - dist;
 
             float cosA = (float)std::cos((double)A.angle);
@@ -435,25 +478,31 @@ static void physicsTick(float dt)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  DRAW BALL   (glow ring + scanline body + midpoint outline + highlight)
+//  DRAW BALL   — everything uses scaledRadius()
 // ════════════════════════════════════════════════════════════════════════════
 static void drawBall(const Ball& b)
 {
     int cx = (int)b.x;
     int cy = (int)b.y;
+    int sr = b.scaledRadius();   // <── scaled radius used for ALL drawing
 
-    scanlineGlowRing(cx, cy, b.radius + 6,
+    // Glow ring is 6 px bigger than scaled radius
+    scanlineGlowRing(cx, cy, sr + 6,
         b.glowR, b.glowG, b.glowB);
 
-    scanlineFillCircle(cx, cy, b.radius,
+    // Main body
+    scanlineFillCircle(cx, cy, sr,
         b.baseR, b.baseG, b.baseB,
         b.glowR, b.glowG, b.glowB);
 
-    midpointCircle(cx, cy, b.radius,
+    // Outline
+    midpointCircle(cx, cy, sr,
         b.glowR, b.glowG, b.glowB, 180);
 
-    // Highlight ring (offset toward light source)
-    midpointCircle(cx - 2, cy - 2, (int)((float)b.radius * 0.55f),
+    // Highlight ring — scales with the ball too
+    //   offset toward light, radius = 55% of scaled radius
+    int highlightR = (int)((float)sr * 0.55f);
+    midpointCircle(cx - 2, cy - 2, highlightR,
         255, 255, 255, 50);
 }
 
@@ -471,7 +520,6 @@ static void drawPivots()
         midpointCircle(px, py, 4, 80, 80, 100);
     }
 
-    // Horizontal bar
     int barL = (int)balls[0].pivotX - 20;
     int barR = (int)balls[1].pivotX + 20;
     thickLine(barL, (int)globalPivotY,
@@ -492,35 +540,43 @@ static void drawStrings()
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  HUD   (drawn via SFML Text — it is the UI layer, not part of the sim)
+//  HUD
 // ════════════════════════════════════════════════════════════════════════════
 static void drawHUD(sf::RenderWindow& window)
 {
     const float RAD2DEG = 180.0f / 3.14159265358979f;
 
-    // ── Ball A ──
+    // ── Ball A  (angle + scale) ──
     {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "A   theta: %.1f deg   omega: %.3f",
-            balls[0].angle * RAD2DEG, balls[0].angularVel);
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+            "A   theta: %6.1f deg   omega: %6.3f   scale: %.2f x  [target: %.2f x]",
+            balls[0].angle * RAD2DEG,
+            balls[0].angularVel,
+            balls[0].scaleFactor,
+            balls[0].scaleTarget);
         sf::Text t;
         t.setString(buf);
-        t.setCharacterSize(13);
+        t.setCharacterSize(12);
         t.setFillColor(sf::Color(192, 82, 44));
-        t.setPosition(14.0f, (float)(WIN_H - 38));
+        t.setPosition(14.0f, (float)(WIN_H - 42));
         window.draw(t);
     }
 
-    // ── Ball B ──
+    // ── Ball B  (angle + scale) ──
     {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "B   theta: %.1f deg   omega: %.3f",
-            balls[1].angle * RAD2DEG, balls[1].angularVel);
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+            "B   theta: %6.1f deg   omega: %6.3f   scale: %.2f x  [target: %.2f x]",
+            balls[1].angle * RAD2DEG,
+            balls[1].angularVel,
+            balls[1].scaleFactor,
+            balls[1].scaleTarget);
         sf::Text t;
         t.setString(buf);
-        t.setCharacterSize(13);
+        t.setCharacterSize(12);
         t.setFillColor(sf::Color(44, 122, 192));
-        t.setPosition(14.0f, (float)(WIN_H - 18));
+        t.setPosition(14.0f, (float)(WIN_H - 22));
         window.draw(t);
     }
 
@@ -529,8 +585,9 @@ static void drawHUD(sf::RenderWindow& window)
         float dx = balls[1].x - balls[0].x;
         float dy = balls[1].y - balls[0].y;
         float dist = (float)std::sqrt((double)(dx * dx + dy * dy));
+        float minD = (float)(balls[0].scaledRadius() + balls[1].scaledRadius());
 
-        if (dist < (float)(balls[0].radius + balls[1].radius + 5))
+        if (dist < minD + 5.0f)
         {
             sf::Text t;
             t.setString("! COLLISION");
@@ -545,30 +602,33 @@ static void drawHUD(sf::RenderWindow& window)
     // ── Title ──
     {
         sf::Text t;
-        t.setString("PENDULUM COLLISION SIMULATION");
+        t.setString("PENDULUM COLLISION + SCALING SIMULATION");
         t.setCharacterSize(11);
         t.setFillColor(sf::Color(70, 70, 90));
-        t.setPosition((float)WIN_W * 0.5f - 140.0f, 10.0f);
+        t.setPosition((float)WIN_W * 0.5f - 175.0f, 10.0f);
         window.draw(t);
     }
 
     // ── Sub-title ──
     {
         sf::Text t;
-        t.setString("Bresenham  |  Midpoint Circle  |  Scanline Fill  |  Manual Physics");
+        t.setString("Bresenham  |  Midpoint Circle  |  Scanline Fill  |  Manual Scaling  |  Physics");
         t.setCharacterSize(10);
         t.setFillColor(sf::Color(55, 55, 70));
-        t.setPosition((float)WIN_W * 0.5f - 195.0f, 24.0f);
+        t.setPosition((float)WIN_W * 0.5f - 230.0f, 24.0f);
         window.draw(t);
     }
 
-    // ── Footer ──
+    // ── Scale range info ──
     {
+        char buf[80];
+        std::snprintf(buf, sizeof(buf), "Click to randomise scale  [%.1f x  —  %.1f x]",
+            SCALE_MIN, SCALE_MAX);
         sf::Text t;
-        t.setString("Click to reset");
+        t.setString(buf);
         t.setCharacterSize(10);
         t.setFillColor(sf::Color(40, 40, 55));
-        t.setPosition(14.0f, (float)(WIN_H - 56));
+        t.setPosition(14.0f, (float)(WIN_H - 60));
         window.draw(t);
     }
 }
@@ -578,8 +638,10 @@ static void drawHUD(sf::RenderWindow& window)
 // ════════════════════════════════════════════════════════════════════════════
 int main()
 {
-    sf::VideoMode   mode(WIN_W, WIN_H);
-    sf::RenderWindow window(mode, "Pendulum Collision — Manual Rasterization");
+    std::srand((unsigned int)std::time(nullptr));   // seed RNG once
+
+    sf::VideoMode    mode(WIN_W, WIN_H);
+    sf::RenderWindow window(mode, "Pendulum Collision + Scaling");
     window.setFramerateLimit(60);
 
     sf::Image   img;
@@ -600,13 +662,25 @@ int main()
                 window.close();
 
             if (event.type == sf::Event::MouseButtonPressed)
-                resetSimulation();
+            {
+                // Left click  → randomise scales (both balls, independently)
+                // Right click → full reset
+                if (event.mouseButton.button == sf::Mouse::Left)
+                    randomiseScales();
+                else if (event.mouseButton.button == sf::Mouse::Right)
+                    resetSimulation();
+            }
         }
 
-        // ── Physics  (sub-stepped for stability) ──
+        // ── Delta time ──
         float dt = clock.restart().asSeconds();
         if (dt > 0.05f) dt = 0.05f;
 
+        // ── Update scale lerp (every frame, outside sub-step) ──
+        for (int i = 0; i < 2; ++i)
+            balls[i].updateScale(dt);
+
+        // ── Physics  (sub-stepped) ──
         float subDt = dt / (float)SUB_STEPS;
         for (int i = 0; i < SUB_STEPS; ++i)
             physicsTick(subDt);
@@ -617,7 +691,7 @@ int main()
         drawPivots();
         drawStrings();
 
-        // Back-to-front by X  (simple depth cue)
+        // Back-to-front
         if (balls[0].x < balls[1].x)
         {
             drawBall(balls[0]);
@@ -629,8 +703,7 @@ int main()
             drawBall(balls[0]);
         }
 
-        // ── Blit pixel buffer to screen ──
-        //   create(unsigned int width, unsigned int height, const Uint8* pixels)
+        // ── Blit ──
         img.create(WIN_W, WIN_H, pixelBuf);
         tex.loadFromImage(img);
         sprite.setTexture(tex);
@@ -638,9 +711,7 @@ int main()
         window.clear();
         window.draw(sprite);
 
-        // HUD on top
         drawHUD(window);
-
         window.display();
     }
 
