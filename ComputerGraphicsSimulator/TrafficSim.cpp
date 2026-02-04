@@ -408,12 +408,55 @@ struct Car
 	}   // BIGGER: 150x70 (was 100x50)
 
 // Update car position based on traffic light state
-	void update(float dt, const TrafficLight& light)
+	void update(float dt, const TrafficLight& light, const Car* otherCar = nullptr)
 	{
-		// Decide what to do based on traffic light
-		if (light.state == LIGHT_GREEN)
+		// Check if we're AT or past the stop line (front of car touched/passed it)
+		// Front of car is at: x + width/2
+		// If front >= stop line, we've touched it
+		bool atOrPastStopLine = (x + width / 2 >= STOP_LINE_X);
+
+		// Check if there's a car in front of us (within safe distance)
+		bool carAhead = false;
+		float safeDistance = 80.0f;   // maintain 80px gap between cars
+
+		if (otherCar != nullptr)
 		{
-			// GREEN — accelerate to max speed
+			// Only care if the other car is ahead of us
+			if (otherCar->x > x)
+			{
+				float gap = otherCar->x - x;   // distance between centers
+				float minGap = (width + otherCar->width) / 2.0f + safeDistance;
+
+				if (gap < minGap)
+					carAhead = true;
+			}
+		}
+
+		// Decide what to do based on traffic light AND position
+		if (carAhead)
+		{
+			// CAR AHEAD — match their speed or brake to avoid collision
+			if (otherCar->velocity < velocity)
+			{
+				// They're slower — brake to match their speed
+				velocity -= CAR_BRAKE * dt;
+				if (velocity < otherCar->velocity)
+					velocity = otherCar->velocity;
+			}
+		}
+		else if (atOrPastStopLine)
+		{
+			// At or past the stop line — ALWAYS accelerate to full speed (ignore the light)
+			if (velocity < CAR_SPEED_MAX)
+			{
+				velocity += CAR_ACCEL * dt;
+				if (velocity > CAR_SPEED_MAX)
+					velocity = CAR_SPEED_MAX;
+			}
+		}
+		else if (light.state == LIGHT_GREEN)
+		{
+			// GREEN and before stop line — accelerate to max speed
 			if (velocity < CAR_SPEED_MAX)
 			{
 				velocity += CAR_ACCEL * dt;
@@ -423,7 +466,7 @@ struct Car
 		}
 		else if (light.state == LIGHT_YELLOW)
 		{
-			// YELLOW — slow down (but keep moving, don't stop)
+			// YELLOW and before stop line — slow down but keep moving
 			if (velocity > CAR_SPEED_MAX * 0.4f)   // slow down to 40% of max speed
 			{
 				velocity -= CAR_BRAKE * dt;
@@ -431,17 +474,14 @@ struct Car
 					velocity = CAR_SPEED_MAX * 0.4f;
 			}
 		}
-		else   // RED
+		else   // RED and before stop line
 		{
-			// RED — stop completely if we haven't passed the stop line yet
-			if (x < STOP_LINE_X - width / 2)
+			// RED — stop completely
+			if (velocity > 0.0f)
 			{
-				if (velocity > 0.0f)
-				{
-					velocity -= CAR_BRAKE * dt;
-					if (velocity < 0.0f)
-						velocity = 0.0f;
-				}
+				velocity -= CAR_BRAKE * dt;
+				if (velocity < 0.0f)
+					velocity = 0.0f;
 			}
 		}
 
@@ -664,9 +704,9 @@ int main()
 		float dt = clock.restart().asSeconds();
 		if (dt > 0.05f) dt = 0.05f;   // cap to avoid huge jumps
 
-		// Update car (no light.update() — light only changes on click now)
-		car1.update(dt, light);
-		car2.update(dt, light);
+		// Update cars (each car checks the other car for collision avoidance)
+		car1.update(dt, light, &car2);   // car1 checks car2
+		car2.update(dt, light, &car1);   // car2 checks car1
 
 		// Draw
 		clearBuffer(30, 120, 50);   // greenish background (sky/grass)
