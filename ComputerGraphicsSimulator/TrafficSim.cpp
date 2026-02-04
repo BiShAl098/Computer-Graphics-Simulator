@@ -310,6 +310,24 @@ static void drawSpoke(int cx, int cy, float angle, int length,
 }
 
 // ============================================================================
+//  CIRCULAR ARC (for speedometer gauge)
+//  Draws an arc from startAngle to endAngle
+// ============================================================================
+static void drawArc(int cx, int cy, int radius, float startAngle, float endAngle,
+	sf::Uint8 r, sf::Uint8 g, sf::Uint8 b)
+{
+	float step = 0.05f;   // angle step size (smaller = smoother)
+	for (float angle = startAngle; angle < endAngle; angle += step)
+	{
+		int x1 = cx + (int)(std::cos(angle) * radius);
+		int y1 = cy + (int)(std::sin(angle) * radius);
+		int x2 = cx + (int)(std::cos(angle + step) * radius);
+		int y2 = cy + (int)(std::sin(angle + step) * radius);
+		thickLine(x1, y1, x2, y2, 3, r, g, b);
+	}
+}
+
+// ============================================================================
 //  TRAFFIC LIGHT STATE
 // ============================================================================
 enum LightState
@@ -446,7 +464,7 @@ struct Car
 			x = -100.0f;
 	}
 
-	// Draw the car — body (rectangle) + wheels (ellipses with spokes) + windows
+	// Draw the car — body (rectangle) + wheels (ellipses with spokes) + windows + BRAKE LIGHTS
 	void draw() const
 	{
 		int carX = (int)x;
@@ -468,6 +486,24 @@ struct Car
 		// Windows (lighter blue rectangles on top half)
 		fillRect(carX - width / 2 + 15, carY - height / 2 + 8, 40, 20, 150, 200, 255);   // left window
 		fillRect(carX + width / 2 - 55, carY - height / 2 + 8, 40, 20, 150, 200, 255);   // right window
+
+		// BRAKE LIGHTS (rear of car — glow RED when slowing down)
+		// If velocity < max speed, we're braking
+		bool braking = (velocity < CAR_SPEED_MAX - 10.0f);
+		int rearX = carX - width / 2;
+
+		if (braking)
+		{
+			// Bright red brake lights
+			fillRect(rearX - 8, carY - height / 2 + 10, 8, 12, 255, 0, 0);     // left brake light
+			fillRect(rearX - 8, carY + height / 2 - 22, 8, 12, 255, 0, 0);     // right brake light
+		}
+		else
+		{
+			// Dark red (off)
+			fillRect(rearX - 8, carY - height / 2 + 10, 8, 12, 80, 0, 0);
+			fillRect(rearX - 8, carY + height / 2 - 22, 8, 12, 80, 0, 0);
+		}
 
 		// Wheels (BIGGER ellipses with rotating spokes)
 		int wheelRx = 18;   // horizontal radius (was 12)
@@ -556,6 +592,36 @@ static void drawHUD(sf::RenderWindow& window, const TrafficLight& light, const C
 }
 
 // ============================================================================
+//  SPEEDOMETER GAUGE (drawn in pixel buffer)
+//  Visual arc showing current speed
+// ============================================================================
+static void drawSpeedometer(const Car& car)
+{
+	int gaugeX = 120;
+	int gaugeY = 130;
+	int gaugeRadius = 50;
+
+	// Background arc (dark grey — shows the full range)
+	float startAngle = 3.14159f * 0.75f;   // 135° (bottom-left)
+	float endAngle = 3.14159f * 2.25f;   // 405° (bottom-right) = 270° total range
+	drawArc(gaugeX, gaugeY, gaugeRadius, startAngle, endAngle, 60, 60, 60);
+
+	// Speed needle arc (colored based on speed)
+	float speedRatio = car.velocity / CAR_SPEED_MAX;   // 0.0 to 1.0
+	float needleAngle = startAngle + speedRatio * (endAngle - startAngle);
+
+	// Color: green when slow, yellow when medium, red when fast
+	sf::Uint8 needleR = (sf::Uint8)(255 * speedRatio);
+	sf::Uint8 needleG = (sf::Uint8)(255 * (1.0f - speedRatio));
+	sf::Uint8 needleB = 0;
+
+	drawArc(gaugeX, gaugeY, gaugeRadius, startAngle, needleAngle, needleR, needleG, needleB);
+
+	// Center dot
+	fillCircle(gaugeX, gaugeY, 5, 100, 100, 100);
+}
+
+// ============================================================================
 //  MAIN
 // ============================================================================
 int main()
@@ -569,7 +635,11 @@ int main()
 	sf::Sprite  sprite;
 
 	TrafficLight light;
-	Car          car;
+	Car          car1;    // first car
+	Car          car2;    // second car (follows behind)
+
+	// Position car2 behind car1
+	car2.x = car1.x - 250.0f;   // 250px behind
 
 	sf::Clock clock;
 
@@ -595,13 +665,26 @@ int main()
 		if (dt > 0.05f) dt = 0.05f;   // cap to avoid huge jumps
 
 		// Update car (no light.update() — light only changes on click now)
-		car.update(dt, light);
+		car1.update(dt, light);
+		car2.update(dt, light);
 
 		// Draw
 		clearBuffer(30, 120, 50);   // greenish background (sky/grass)
 		drawRoad();
+		drawSpeedometer(car1);   // speedometer gauge (top-left) — shows car1's speed
 		light.draw();
-		car.draw();
+
+		// Draw cars back-to-front (whoever is further left draws first)
+		if (car1.x < car2.x)
+		{
+			car1.draw();
+			car2.draw();
+		}
+		else
+		{
+			car2.draw();
+			car1.draw();
+		}
 
 		// Blit pixel buffer to screen
 		img.create(WIN_W, WIN_H, pixelBuf);
@@ -612,7 +695,7 @@ int main()
 		window.draw(sprite);
 
 		// HUD on top
-		drawHUD(window, light, car);
+		drawHUD(window, light, car1);
 
 		window.display();
 	}
