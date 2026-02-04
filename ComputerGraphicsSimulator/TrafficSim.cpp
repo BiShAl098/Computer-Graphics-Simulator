@@ -4,12 +4,13 @@
 // ============================================================================
 //
 //  WHAT THIS DOES:
-//      - Traffic light cycles: Green → Yellow → Red → Green (repeats forever)
+//      - Traffic light controlled by YOU (click to change it)
 //      - One car drives from left to right
-//      - GREEN light   → car drives at full speed
-//      - YELLOW light  → car slows down
-//      - RED light     → car stops completely
-//      - When light turns green again, car accelerates back to full speed
+//      - GREEN light   → car drives at full speed (200 px/s)
+//      - YELLOW light  → car slows down to 40% speed (80 px/s) but keeps moving
+//      - RED light     → car stops completely at the stop line
+//      - Click anywhere to cycle: GREEN → YELLOW → RED → GREEN
+//      - Car obeys whatever light you set
 //      - When car reaches the right edge, it wraps back to the left
 //
 //  GRAPHICS ALGORITHMS USED (all manual, no SFML shapes):
@@ -39,11 +40,6 @@
 // ============================================================================
 static const unsigned int WIN_W = 1000u;
 static const unsigned int WIN_H = 600u;
-
-// Traffic light timing (in seconds)
-static const float GREEN_DURATION = 4.0f;   // green light lasts 4 seconds
-static const float YELLOW_DURATION = 2.0f;   // yellow light lasts 2 seconds
-static const float RED_DURATION = 3.0f;   // red light lasts 3 seconds
 
 // Car physics
 static const float CAR_SPEED_MAX = 200.0f;   // max speed: 200 pixels per second
@@ -302,6 +298,18 @@ static void fillRect(int x, int y, int w, int h,
 }
 
 // ============================================================================
+//  ROTATED LINE (for wheel spokes)
+//  Draws a line from center (cx, cy) at given angle and length
+// ============================================================================
+static void drawSpoke(int cx, int cy, float angle, int length,
+	sf::Uint8 r, sf::Uint8 g, sf::Uint8 b)
+{
+	int x1 = cx + (int)(std::cos(angle) * length);
+	int y1 = cy + (int)(std::sin(angle) * length);
+	thickLine(cx, cy, x1, y1, 2, r, g, b);
+}
+
+// ============================================================================
 //  TRAFFIC LIGHT STATE
 // ============================================================================
 enum LightState
@@ -314,33 +322,18 @@ enum LightState
 struct TrafficLight
 {
 	LightState state;
-	float      timer;   // time left in current state
 
-	TrafficLight() : state(LIGHT_GREEN), timer(GREEN_DURATION) {}
+	TrafficLight() : state(LIGHT_GREEN) {}   // start on GREEN
 
-	// Update the light every frame
-	void update(float dt)
+	// Cycle to the next light state (called on click)
+	void cycle()
 	{
-		timer -= dt;
-		if (timer <= 0.0f)
-		{
-			// Cycle to next state
-			if (state == LIGHT_GREEN)
-			{
-				state = LIGHT_YELLOW;
-				timer = YELLOW_DURATION;
-			}
-			else if (state == LIGHT_YELLOW)
-			{
-				state = LIGHT_RED;
-				timer = RED_DURATION;
-			}
-			else   // RED
-			{
-				state = LIGHT_GREEN;
-				timer = GREEN_DURATION;
-			}
-		}
+		if (state == LIGHT_GREEN)
+			state = LIGHT_YELLOW;
+		else if (state == LIGHT_YELLOW)
+			state = LIGHT_RED;
+		else   // RED
+			state = LIGHT_GREEN;
 	}
 
 	// Draw the traffic light (3 circles: top=red, middle=yellow, bottom=green)
@@ -390,11 +383,13 @@ struct Car
 	int width;       // car body width
 	int height;      // car body height
 
-	Car() : x(100.0f), y(400.0f), velocity(CAR_SPEED_MAX),
-		width(100), height(50) {
-	}
+	float wheelRotation;   // wheel rotation angle in radians (for animation)
 
-	// Update car position based on traffic light state
+	Car() : x(100.0f), y(400.0f), velocity(CAR_SPEED_MAX),
+		width(150), height(70), wheelRotation(0.0f) {
+	}   // BIGGER: 150x70 (was 100x50)
+
+// Update car position based on traffic light state
 	void update(float dt, const TrafficLight& light)
 	{
 		// Decide what to do based on traffic light
@@ -410,18 +405,17 @@ struct Car
 		}
 		else if (light.state == LIGHT_YELLOW)
 		{
-			// YELLOW — slow down
-			// Only brake if we haven't already stopped
-			if (velocity > 0.0f && x < STOP_LINE_X - width / 2)
+			// YELLOW — slow down (but keep moving, don't stop)
+			if (velocity > CAR_SPEED_MAX * 0.4f)   // slow down to 40% of max speed
 			{
 				velocity -= CAR_BRAKE * dt;
-				if (velocity < 0.0f)
-					velocity = 0.0f;
+				if (velocity < CAR_SPEED_MAX * 0.4f)
+					velocity = CAR_SPEED_MAX * 0.4f;
 			}
 		}
 		else   // RED
 		{
-			// RED — stop if we haven't passed the stop line yet
+			// RED — stop completely if we haven't passed the stop line yet
 			if (x < STOP_LINE_X - width / 2)
 			{
 				if (velocity > 0.0f)
@@ -436,12 +430,23 @@ struct Car
 		// Move forward
 		x += velocity * dt;
 
+		// Rotate wheels based on velocity
+		// Wheel circumference ≈ 2π * wheelRadius
+		// wheelRadius = 12 (the horizontal radius)
+		// rotationSpeed = velocity / circumference
+		float wheelCircumference = 2.0f * 3.14159f * 12.0f;   // 2πr
+		wheelRotation += (velocity / wheelCircumference) * 2.0f * 3.14159f * dt;
+
+		// Keep angle in [0, 2π) range to avoid overflow
+		while (wheelRotation > 6.28318f)   // 2π
+			wheelRotation -= 6.28318f;
+
 		// Wrap around if we go off the right edge
 		if (x > (float)WIN_W + 100.0f)
 			x = -100.0f;
 	}
 
-	// Draw the car — body (rectangle) + wheels (ellipses) + windows
+	// Draw the car — body (rectangle) + wheels (ellipses with spokes) + windows
 	void draw() const
 	{
 		int carX = (int)x;
@@ -452,31 +457,52 @@ struct Car
 
 		// Outline of body
 		thickLine(carX - width / 2, carY - height / 2,
-			carX + width / 2, carY - height / 2, 2, 30, 60, 120);   // top
+			carX + width / 2, carY - height / 2, 3, 30, 60, 120);   // top
 		thickLine(carX - width / 2, carY + height / 2,
-			carX + width / 2, carY + height / 2, 2, 30, 60, 120);   // bottom
+			carX + width / 2, carY + height / 2, 3, 30, 60, 120);   // bottom
 		thickLine(carX - width / 2, carY - height / 2,
-			carX - width / 2, carY + height / 2, 2, 30, 60, 120);   // left
+			carX - width / 2, carY + height / 2, 3, 30, 60, 120);   // left
 		thickLine(carX + width / 2, carY - height / 2,
-			carX + width / 2, carY + height / 2, 2, 30, 60, 120);   // right
+			carX + width / 2, carY + height / 2, 3, 30, 60, 120);   // right
 
 		// Windows (lighter blue rectangles on top half)
-		fillRect(carX - width / 2 + 10, carY - height / 2 + 5, 30, 15, 150, 200, 255);   // left window
-		fillRect(carX + width / 2 - 40, carY - height / 2 + 5, 30, 15, 150, 200, 255);   // right window
+		fillRect(carX - width / 2 + 15, carY - height / 2 + 8, 40, 20, 150, 200, 255);   // left window
+		fillRect(carX + width / 2 - 55, carY - height / 2 + 8, 40, 20, 150, 200, 255);   // right window
 
-		// Wheels (black filled ellipses)
-		int wheelRx = 12;
-		int wheelRy = 8;
-		int wheelY = carY + height / 2 + 5;
-		int wheel1X = carX - width / 2 + 20;
-		int wheel2X = carX + width / 2 - 20;
+		// Wheels (BIGGER ellipses with rotating spokes)
+		int wheelRx = 18;   // horizontal radius (was 12)
+		int wheelRy = 12;   // vertical radius (was 8)
+		int wheelY = carY + height / 2 + 8;
+		int wheel1X = carX - width / 2 + 30;
+		int wheel2X = carX + width / 2 - 30;
 
-		fillEllipse(wheel1X, wheelY, wheelRx, wheelRy, 20, 20, 20);   // left wheel
-		fillEllipse(wheel2X, wheelY, wheelRx, wheelRy, 20, 20, 20);   // right wheel
+		// Left wheel
+		fillEllipse(wheel1X, wheelY, wheelRx, wheelRy, 20, 20, 20);   // black tire
+		midpointEllipse(wheel1X, wheelY, wheelRx, wheelRy, 80, 80, 80);   // grey outline
 
-		// Wheel outlines
-		midpointEllipse(wheel1X, wheelY, wheelRx, wheelRy, 80, 80, 80);
+		// Left wheel spokes (4 spokes rotating)
+		for (int i = 0; i < 4; ++i)
+		{
+			float spokeAngle = wheelRotation + (float)i * (3.14159f / 2.0f);   // 90° apart
+			drawSpoke(wheel1X, wheelY, spokeAngle, wheelRx - 4, 120, 120, 120);
+		}
+
+		// Center hub (small grey circle)
+		fillCircle(wheel1X, wheelY, 4, 80, 80, 80);
+
+		// Right wheel (same as left)
+		fillEllipse(wheel2X, wheelY, wheelRx, wheelRy, 20, 20, 20);
 		midpointEllipse(wheel2X, wheelY, wheelRx, wheelRy, 80, 80, 80);
+
+		// Right wheel spokes
+		for (int i = 0; i < 4; ++i)
+		{
+			float spokeAngle = wheelRotation + (float)i * (3.14159f / 2.0f);
+			drawSpoke(wheel2X, wheelY, spokeAngle, wheelRx - 4, 120, 120, 120);
+		}
+
+		// Center hub
+		fillCircle(wheel2X, wheelY, 4, 80, 80, 80);
 	}
 };
 
@@ -504,9 +530,9 @@ static void drawHUD(sf::RenderWindow& window, const TrafficLight& light, const C
 	char buf[128];
 	const char* stateStr = (light.state == LIGHT_GREEN) ? "GREEN" :
 		(light.state == LIGHT_YELLOW) ? "YELLOW" : "RED";
-	std::snprintf(buf, sizeof(buf), "Light: %s  (%.1fs)", stateStr, light.timer);
+	std::snprintf(buf, sizeof(buf), "Light: %s", stateStr);
 	t1.setString(buf);
-	t1.setCharacterSize(18);
+	t1.setCharacterSize(20);
 	t1.setFillColor(sf::Color(255, 255, 255));
 	t1.setPosition(20, 20);
 	window.draw(t1);
@@ -522,10 +548,10 @@ static void drawHUD(sf::RenderWindow& window, const TrafficLight& light, const C
 
 	// Instructions
 	sf::Text t3;
-	t3.setString("Traffic Simulation — Car obeys traffic light | Close window to quit");
-	t3.setCharacterSize(14);
-	t3.setFillColor(sf::Color(180, 180, 180));
-	t3.setPosition(20, WIN_H - 30);
+	t3.setString("CLICK ANYWHERE to change the traffic light  |  Car obeys the light");
+	t3.setCharacterSize(15);
+	t3.setFillColor(sf::Color(220, 220, 220));
+	t3.setPosition(20, WIN_H - 35);
 	window.draw(t3);
 }
 
@@ -555,14 +581,20 @@ int main()
 		{
 			if (event.type == sf::Event::Closed)
 				window.close();
+
+			// LEFT CLICK anywhere → cycle the traffic light
+			if (event.type == sf::Event::MouseButtonPressed)
+			{
+				if (event.mouseButton.button == sf::Mouse::Left)
+					light.cycle();
+			}
 		}
 
 		// Delta time
 		float dt = clock.restart().asSeconds();
 		if (dt > 0.05f) dt = 0.05f;   // cap to avoid huge jumps
 
-		// Update
-		light.update(dt);
+		// Update car (no light.update() — light only changes on click now)
 		car.update(dt, light);
 
 		// Draw
