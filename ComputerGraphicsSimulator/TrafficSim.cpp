@@ -403,11 +403,17 @@ struct Car
 
     float wheelRotation;   // wheel rotation angle in radians (for animation)
 
-    Car() : x(100.0f), y(400.0f), velocity(0.0f),   // Start from REST (0 velocity)
-        width(150), height(70), wheelRotation(0.0f) {
-    }
+    // Car body colors (RGB)
+    sf::Uint8 bodyR, bodyG, bodyB;       // main body color
+    sf::Uint8 outlineR, outlineG, outlineB;  // outline color
 
-    // Update car position based on traffic light state
+    Car() : x(100.0f), y(400.0f), velocity(0.0f),   // Start from REST (0 velocity)
+        width(150), height(70), wheelRotation(0.0f),
+        bodyR(50), bodyG(100), bodyB(200),           // default blue body
+        outlineR(30), outlineG(60), outlineB(120) {
+    } // default blue outline
+
+// Update car position based on traffic light state
     void update(float dt, const TrafficLight& light, const Car* otherCar = nullptr)
     {
         // Check if we're AT or past the stop line (front of car touched/passed it)
@@ -521,22 +527,22 @@ struct Car
         int carX = (int)x;
         int carY = (int)y;
 
-        // Car body (blue rectangle)
-        fillRect(carX - width / 2, carY - height / 2, width, height, 50, 100, 200);
+        // Car body (uses car's color)
+        fillRect(carX - width / 2, carY - height / 2, width, height, bodyR, bodyG, bodyB);
 
-        // Outline of body
+        // Outline of body (uses car's outline color)
         thickLine(carX - width / 2, carY - height / 2,
-            carX + width / 2, carY - height / 2, 3, 30, 60, 120);   // top
+            carX + width / 2, carY - height / 2, 3, outlineR, outlineG, outlineB);   // top
         thickLine(carX - width / 2, carY + height / 2,
-            carX + width / 2, carY + height / 2, 3, 30, 60, 120);   // bottom
+            carX + width / 2, carY + height / 2, 3, outlineR, outlineG, outlineB);   // bottom
         thickLine(carX - width / 2, carY - height / 2,
-            carX - width / 2, carY + height / 2, 3, 30, 60, 120);   // left
+            carX - width / 2, carY + height / 2, 3, outlineR, outlineG, outlineB);   // left
         thickLine(carX + width / 2, carY - height / 2,
-            carX + width / 2, carY + height / 2, 3, 30, 60, 120);   // right
+            carX + width / 2, carY + height / 2, 3, outlineR, outlineG, outlineB);   // right
 
-        // Windows (lighter blue rectangles on top half)
-        fillRect(carX - width / 2 + 15, carY - height / 2 + 8, 40, 20, 150, 200, 255);   // left window
-        fillRect(carX + width / 2 - 55, carY - height / 2 + 8, 40, 20, 150, 200, 255);   // right window
+        // Windows (light cyan/white - works with both red and blue cars)
+        fillRect(carX - width / 2 + 15, carY - height / 2 + 8, 40, 20, 200, 230, 255);   // left window
+        fillRect(carX + width / 2 - 55, carY - height / 2 + 8, 40, 20, 200, 230, 255);   // right window
 
         // BRAKE LIGHTS (rear of car — glow RED when slowing down)
         // If velocity < max speed, we're braking
@@ -610,7 +616,7 @@ static void drawRoad()
     thickLine(STOP_LINE_X, 380, STOP_LINE_X, 480, 5, 255, 255, 255);
 }
 
-static void drawHUD(sf::RenderWindow& window, const TrafficLight& light, const Car& car)
+static void drawHUD(sf::RenderWindow& window, const TrafficLight& light, const Car& car1, const Car& car2)
 {
     // Light state text
     sf::Text t1;
@@ -624,33 +630,41 @@ static void drawHUD(sf::RenderWindow& window, const TrafficLight& light, const C
     t1.setPosition(20, 20);
     window.draw(t1);
 
-    // Car velocity text
+    // Car 1 velocity text
     sf::Text t2;
-    std::snprintf(buf, sizeof(buf), "Car Speed: %.0f px/s  (Max: %.0f)", car.velocity, CAR_SPEED_MAX);
+    std::snprintf(buf, sizeof(buf), "Car 1 Speed: %.0f px/s", car1.velocity);
     t2.setString(buf);
     t2.setCharacterSize(16);
-    t2.setFillColor(sf::Color(255, 255, 255));
+    t2.setFillColor(sf::Color(192, 82, 44));   // orange (car1 color)
     t2.setPosition(20, 50);
     window.draw(t2);
 
-    // Instructions
+    // Car 2 velocity text
     sf::Text t3;
-    t3.setString("CLICK ANYWHERE to change the traffic light  |  Car obeys the light");
-    t3.setCharacterSize(15);
-    t3.setFillColor(sf::Color(220, 220, 220));
-    t3.setPosition(20, WIN_H - 35);
+    std::snprintf(buf, sizeof(buf), "Car 2 Speed: %.0f px/s", car2.velocity);
+    t3.setString(buf);
+    t3.setCharacterSize(16);
+    t3.setFillColor(sf::Color(44, 122, 192));   // blue (car2 color)
+    t3.setPosition(20, 75);
     window.draw(t3);
+
+    // Instructions
+    sf::Text t4;
+    t4.setString("CLICK ANYWHERE to change the traffic light  |  Car obeys the light");
+    t4.setCharacterSize(15);
+    t4.setFillColor(sf::Color(220, 220, 220));
+    t4.setPosition(20, WIN_H - 35);
+    window.draw(t4);
 }
 
 // ============================================================================
 //  SPEEDOMETER GAUGE (drawn in pixel buffer)
 //  Visual arc showing current speed
 // ============================================================================
-static void drawSpeedometer(const Car& car)
+static void drawSpeedometer(const Car& car, int gaugeX, int gaugeY,
+    sf::Uint8 labelR, sf::Uint8 labelG, sf::Uint8 labelB)
 {
-    int gaugeX = 120;
-    int gaugeY = 130;
-    int gaugeRadius = 50;
+    int gaugeRadius = 45;   // slightly smaller so both fit
 
     // Background arc (dark grey — shows the full range)
     float startAngle = 3.14159f * 0.75f;   // 135° (bottom-left)
@@ -670,6 +684,10 @@ static void drawSpeedometer(const Car& car)
 
     // Center dot
     fillCircle(gaugeX, gaugeY, 5, 100, 100, 100);
+
+    // Label (A or B) - drawn as small filled rectangle forming letter
+    // Draw a simple colored square indicator instead of letter
+    fillRect(gaugeX - 8, gaugeY + gaugeRadius + 10, 16, 6, labelR, labelG, labelB);
 }
 
 // ============================================================================
@@ -692,6 +710,15 @@ int main()
     // Set initial positions: both start from rest, spaced far apart
     car1.x = 300.0f;      // car1 starts at x=300
     car2.x = -200.0f;     // car2 starts off-screen left, enters later
+
+    // Set car colors to match their speedometer indicators
+    // Car 1 - ORANGE/RED (matches orange indicator: 192, 82, 44)
+    car1.bodyR = 220;  car1.bodyG = 80;   car1.bodyB = 50;    // orange body
+    car1.outlineR = 150;  car1.outlineG = 50;   car1.outlineB = 30;   // darker orange outline
+
+    // Car 2 - BLUE (matches blue indicator: 44, 122, 192)
+    car2.bodyR = 50;   car2.bodyG = 120;  car2.bodyB = 220;   // blue body
+    car2.outlineR = 30;   car2.outlineG = 80;   car2.outlineB = 150;   // darker blue outline
 
     sf::Clock clock;
 
@@ -723,7 +750,11 @@ int main()
         // Draw
         clearBuffer(30, 120, 50);   // greenish background (sky/grass)
         drawRoad();
-        drawSpeedometer(car1);   // speedometer gauge (top-left) — shows car1's speed
+
+        // Draw two speedometers side by side
+        drawSpeedometer(car1, 100, 120, 192, 82, 44);    // car1 gauge (orange indicator)
+        drawSpeedometer(car2, 220, 120, 44, 122, 192);   // car2 gauge (blue indicator)
+
         light.draw();
 
         // Draw cars back-to-front (whoever is further left draws first)
@@ -747,7 +778,7 @@ int main()
         window.draw(sprite);
 
         // HUD on top
-        drawHUD(window, light, car1);
+        drawHUD(window, light, car1, car2);   // pass both cars
 
         window.display();
     }
